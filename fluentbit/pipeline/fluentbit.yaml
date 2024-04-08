@@ -1,0 +1,255 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  annotations:
+    meta.helm.sh/release-name: fluent-bit
+    meta.helm.sh/release-namespace: fluentbit
+  labels:
+    app.kubernetes.io/instance: fluent-bit
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/version: 3.0.0
+    helm.sh/chart: fluent-bit-0.42.0
+  name: fluent-bit
+  namespace: fluentbit
+data:
+  custom_parsers.conf: |
+    [PARSER]
+        Name docker_no_time
+        Format json
+        Time_Keep Off
+        Time_Key time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+  fluent-bit.yaml: |
+    service:
+      http_server: "on"
+      Health_Check: "on"
+
+
+
+    pipeline:
+      inputs:
+        - name: tail
+          path: /var/log/containers/*.log
+          multiline.parser: docker, cri
+          tag: kube.*
+          mem_Buf_Limit: 5MB
+          skip_Long_Lines: On
+          processors:
+            logs:
+              - name: content_modifier
+                action: insert
+                key: k8s.cluster.name 
+                value: ${CLUSTERNAME}
+              - name: content_modifier
+                action: insert
+                key: dt.kubernetes.cluster.id
+                value: ${CLUSTER_ID}
+              - name: content_modifier
+                context: attributes
+                action: upsert
+                key: "agent"
+                value: "fluentbitv3"
+         
+        - name:  prometheus_scrape
+          host: prometheus-prometheus-node-exporter.default.svc.cluster.local
+          port: 9100
+          tag:   metric.node_metrics
+          scrape_interval: 5
+          processors:
+            metrics:
+              - name: metrics_selector
+                metric_name: /scrape_/
+                action: exclude
+              - name: metrics_selector
+                metric_name: /go_/
+                action: exclude
+              - name: metrics_selector
+                metric_name: /up/
+                action: exclude
+
+
+    
+          
+        - name:  prometheus_scrape
+          host: prometheus-kube-state-metrics.default.svc.cluster.local
+          port: 8080
+          tag:   metric.kube_state_metric
+          scrape_interval: 5       
+          processors:
+            metrics:
+              - name: metrics_selector
+                metric_name: /scrape_/
+                action: exclude
+              - name: metrics_selector
+                metric_name: /go_/
+                action: exclude
+              - name: metrics_selector
+                metric_name: /up/
+                action: exclude
+
+    
+        - name: prometheus_scrape
+          host: kepler.kepler.svc.cluster.local
+          port: 9102
+          tag: metric.kepler 
+          processors:
+            metrics:
+              - name: metrics_selector
+                metric_name: /scrape_/
+                action: exclude
+              - name: metrics_selector
+                metric_name: /go_/
+                action: exclude
+              - name: metrics_selector
+                metric_name: /up/
+                action: exclude
+              - name: metrics_selector
+                metric_name: /kepler_process_uncore_joules/
+                action: exclude
+              - name: labels
+                delete: container_id
+              - name: labels
+                delete: pid
+              - name: labels
+                update:
+                   label_name: pod_name
+                   label_value: k8s.pod.name
+              
+              - name: labels
+                update: 
+                   label_name: container_namespace
+                   label_value: k8s.namespace.name
+              - name: labels
+                update: 
+                   label_name: container_name
+                   label_value: k8s.container.name
+              - name: labels
+                update: 
+                   label_name: instance
+                   label_value: k8s.node.name
+    
+        - name: fluentbit_metrics
+          tag:  metric.fluent
+          scrape_interval: 5
+    
+      
+    
+        - name: opentelemetry
+          listen: ${MY_POD_IP}
+          port: 4318
+          tag: otel.otlphttp
+          processors:
+            traces:
+              - name: content_modifier
+                context: span_attributes
+                action: upsert
+                key: "agent"
+                value: "fluentbitv3"
+
+    
+    
+    
+    
+      filters:
+        
+        - name: kubernetes
+          match: kube.*
+          merge_log: on
+          keep_log: off
+          k8s-logging.parser : on
+          k8S-logging.exclude: on
+        
+       
+    
+        - name: nest
+          match: kube.*
+          operation: lift
+          nested_under: kubernetes
+          add_prefix :  kubernetes_
+        - name: nest
+          match: kube.*
+          operation: lift
+          nested_under: kubernetes_labels
+        - name: modify
+          match: kube.*
+          rename: 
+            - log content
+            - kubernetes_pod_name k8s.pod.name
+            - kubernetes_namespace_name k8s.namespace.name
+            - kubernetes_container_name k8S.container.name
+            - kubernetes_pod_id k8s.pod.uid
+          remove: 
+             - kubernetes_container_image
+             - kubernetes_docker_id
+             - kubernetes_annotations
+             - kubernetes_host
+             - time
+             - kubernetes_container_hash
+             - kubernetes_pod_id
+             - kubernetes_container_name
+             - kubernetes_pod_name
+             - kubernetes_namespace_name
+        - name: throttle
+          match: "*"
+          rate:     800
+          window:   3
+          print_Status: true
+          interval: 30s
+        
+        
+
+      outputs:
+        - name: opentelemetry
+          host: ${DT_ENDPOINT_HOST}
+          port: 443
+          match: "otel.*"
+          metrics_uri: /api/v2/otlp/v1/metrics
+          traces_uri:  /api/v2/otlp/v1/traces
+          logs_uri: /api/v2/otlp/v1/logs
+          log_response_payload: true
+          tls:  On
+          tls.verify: Off
+          header:
+            - Authorization Api-Token ${DT_API_TOKEN}
+            - Content-type application/x-protobuf
+
+      
+    
+        - name: stdout
+          match: "kube.*"
+          format: json_lines
+          processors:
+            logs:
+              - name: sql
+                query: "SELECT k8s.cluster.name, k8s.namespace.name,k8s.pod.name,content FROM STREAM WHERE k8s.namespace.name='otel-demo';"
+    
+        - name: opentelemetry
+          host: ${DT_ENDPOINT_HOST}
+          port: 443
+          match: "kube.*"
+          metrics_uri: /api/v2/otlp/v1/metrics
+          traces_uri:  /api/v2/otlp/v1/traces
+          logs_uri: /api/v2/otlp/v1/logs
+          log_response_payload: true
+          tls:  On
+          tls.verify: Off
+          header:
+            - Authorization Api-Token ${DT_API_TOKEN}
+            - Content-type application/x-protobuf
+    
+        - name: prometheus_exporter
+          match: "metric.*"
+          host: 0.0.0.0
+          port: 2021
+      
+        - name: prometheus_exporter
+          match: "otel.otlphttp.v1_metrics.*"
+          host: 0.0.0.0
+          port: 2021
+     
+          
+    
+        
+
+
