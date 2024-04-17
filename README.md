@@ -87,12 +87,13 @@ DATA_INGEST_TOKEN=<YOUR TOKEN VALUE>
 
 1. Download Istioctl
 ```shell
+export ISTIO_VERSION=1.21.0
 curl -L https://istio.io/downloadIstio | sh -
 ```
-This command download the latest version of istio ( in our case istio 1.18.2) compatible with our operating system.
+This command download the latest version of istio ( in our case istio 1.21.0) compatible with our operating system.
 2. Add istioctl to you PATH
 ```shell
-cd istio-1.21.0
+cd istio-$ISTIO_VERSION
 ```
 this directory contains samples with addons . We will refer to it later.
 ```shell
